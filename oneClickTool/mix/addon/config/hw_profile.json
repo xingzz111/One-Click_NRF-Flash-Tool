@@ -1,0 +1,55 @@
+{
+    "shared_devices": {
+        "i2c_0": {
+            "class": "I2C",
+            "dev_name": "/dev/i2c-0"
+        },
+        "i2c_mux1":{
+            "class": "TCA9548", 
+            "dev_addr": 112,
+            "i2c_bus": "@i2c_0"
+        },
+        "i2c_mux2":{
+            "class": "TCA9548", 
+            "dev_addr": 113,
+            "i2c_bus": "@i2c_0"
+        },
+        "gpio992": {"class": "GPIO","pin_id": 992,"default_dir": "output"},
+        "gpio993": {"class": "GPIO","pin_id": 993,"default_dir": "input"},
+        "gpio994": {"class": "GPIO","pin_id": 994,"default_dir": "input"},
+        "gpio995": {"class": "GPIO","pin_id": 995,"default_dir": "output"}
+
+
+    },
+
+    "duts": {
+        "dut0": {
+            "vdm001":{
+            "class": "VDM002001",
+            "pd_i2c_1":"@i2c_mux1.3",
+            "pd_i2c_2":"@i2c_mux1.4",
+            "source_capabilities": [
+                    {"voltage": 5000, "max_current": 3000, "source_switch": "PP_5V"},
+                    {"voltage": 12000, "max_current": 3000, "source_switch": "PP_HVE"},
+                    {"voltage": 15000, "max_current": 5000, "source_switch": "PP_HVE"}
+                ]
+            },
+            "scope": {
+                "class": "DMM003004", 
+                "i2c": "@i2c_mux.2",
+                "ipcore": "/dev/MIX_DAQT2_SG_R_0"
+            },
+
+            "site": 0,
+            "server": {"endpoint": "tcp://*:7801"}
+        }
+    },
+    "network":{
+        "pins": [],
+        "base_ip": "169.254.1.32",
+        "ip_addr_file": "/boot/ip_addr.conf",
+        "default_ip": "169.254.1.32"
+    },
+    "xavier_type": "xavier"
+}
+

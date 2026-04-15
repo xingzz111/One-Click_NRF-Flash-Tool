@@ -1,0 +1,6 @@
+#!/Users/XING/Documents/A193/DFU/0408/Atlas2/.venv_pyi311/bin/python
+import sys
+from macholib.macho_dump import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())
