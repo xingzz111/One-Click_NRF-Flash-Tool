@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -155,20 +156,11 @@ def colored(text: str, style: str) -> str:
 # ASCII Art and UI Components
 # =============================================================================
 ASCII_LOGO = r"""
- _   _  _____   ______
-| \ | | |  __ \ |  ____|
-|  \| | | |__) || |__
-| . ` | |  _  / |  __|
-| |\  | | | \ \ | |
-|_| \_| |_|  \_\|_|
-
- ______ _           _     _______          _
-|  ____| |         | |   |__   __|        | |
-| |__  | | __ _ ___| |__    | | ___   ___ | |
-|  __| | |/ _` / __| '_ \   | |/ _ \ / _ \| |
-| |    | | (_| \__ \ | | |  | | (_) | (_) | |
-|_|    |_|\__,_|___/_| |_|  |_|\___/ \___/|_|
-
+  \  |            _)      __ __|           |  
+ |\/ |  _` |  _` | |  __|    |  _ \   _ \  |  
+ |   | (   | (   | | (       | (   | (   | |  
+_|  _|\__,_|\__, |_|\___|   _|\___/ \___/ _|  
+            |___/                             
 """
 
 def print_banner() -> None:
@@ -176,6 +168,9 @@ def print_banner() -> None:
     print(colored(ASCII_LOGO, Style.TITLE))
     print(colored("=" * 70, Style.BOX_LINE))
     print(colored("  One-Click J-Link Programming Tool for Nordic nRF Devices  ", Style.INFO))
+    print(colored("  One-Click OpenOCD Programming Tool for Ulpod Devices  ", Style.INFO))
+    print(colored("  One-Click I2C Programming Tool for CPS and TPS Devices  ", Style.INFO))
+    print(colored("  One-Click Power Up Tool  ", Style.INFO))
     print(colored("=" * 70, Style.BOX_LINE))
     print()
 
@@ -646,36 +641,393 @@ def extract_download_file_path(jlink_out: str) -> Optional[str]:
     return m.group(1).strip()
 
 
-def prompt_channel(previous: Optional[str]) -> str:
+STATIONS = ["PowerDFU", "DataDFU", "PowerFCT", "DataFCT"]
+
+
+def prompt_station(previous: Optional[str]) -> str:
     while True:
+        print()
+        print_separator("─", 60)
+        print(colored("  请选择 Station", Style.HEADER))
+        print(colored("  [1] PowerDFU", Style.INFO))
+        print(colored("  [2] DataDFU", Style.INFO))
+        print(colored("  [3] PowerFCT", Style.INFO))
+        print(colored("  [4] DataFCT", Style.INFO))
+        print_separator("─", 60)
         if previous:
-            s = input(f"选择通道 32/33/34/35 (回车保持: {previous}): ").strip()
+            s = input(f"请输入选项 1/2/3/4 (回车保持: {previous}): ").strip()
             if not s:
                 return previous
         else:
-            s = input("选择通道 32/33/34/35: ").strip()
+            s = input("请输入选项 1/2/3/4: ").strip()
+        mapping = {"1": "PowerDFU", "2": "DataDFU", "3": "PowerFCT", "4": "DataFCT"}
+        station = mapping.get(s)
+        if station:
+            return station
+        print_status("Station 输入无效，请输入 1/2/3/4", "warning")
+
+
+def prompt_slot(previous: Optional[str]) -> str:
+    while True:
+        if previous:
+            s = input(f"选择 Slot 1/2/3/4 (回车保持: {previous}): ").strip()
+            if not s:
+                return previous
+        else:
+            s = input("选择 Slot 1/2/3/4: ").strip()
         s = s.strip()
-        if s in {"32", "33", "34", "35"}:
+        if s in {"1", "2", "3", "4"}:
             return s
-        print_status("通道输入无效，请输入 32/33/34/35", "warning")
+        print_status("Slot 输入无效，请输入 1/2/3/4", "warning")
 
 
-def rpc_power_up(channel: str) -> None:
+def prompt_action(station: str) -> str:
+    action_labels = []
+    if station != "DataFCT":
+        action_labels.append("[1] 烧录")
+    if station != "PowerDFU":
+        action_labels.append("[2] 一键上电")
+        action_labels.append("[3] 一键下电")
+    while True:
+        print()
+        print_separator("─", 60)
+        print(colored(f"  请选择操作 ({station})", Style.HEADER))
+        for item in action_labels:
+            print(colored(f"  {item}", Style.INFO))
+        print_separator("─", 60)
+        if station == "PowerDFU":
+            s = input("请输入选项 1: ").strip()
+        elif station == "DataFCT":
+            s = input("请输入选项 2/3: ").strip()
+        else:
+            s = input("请输入选项 1/2/3: ").strip()
+        if s == "1":
+            if station == "DataFCT":
+                print_status("DataFCT 暂不支持一键烧录", "warning")
+                continue
+            return "flash"
+        if s == "2":
+            if station == "PowerDFU":
+                print_status("PowerDFU 不提供独立一键上电", "warning")
+                continue
+            return "power_up"
+        if s == "3":
+            if station == "PowerDFU":
+                print_status("PowerDFU 不提供独立一键下电", "warning")
+                continue
+            return "power_off"
+        if station == "PowerDFU":
+            print_status("操作输入无效，请输入 1", "warning")
+        elif station == "DataFCT":
+            print_status("操作输入无效，请输入 2/3", "warning")
+        else:
+            print_status("操作输入无效，请输入 1/2/3", "warning")
+
+
+def prompt_powerdfu_flash_kind(previous: Optional[str]) -> str:
+    while True:
+        print()
+        print_separator("─", 60)
+        print(colored("  请选择 PowerDFU 烧录类型", Style.HEADER))
+        print(colored("  [1] CPS", Style.INFO))
+        print(colored("  [2] TPS", Style.INFO))
+        print(colored("  [3] ULPOD", Style.INFO))
+        print_separator("─", 60)
+        if previous:
+            s = input(f"请输入选项 1/2/3 (回车保持: {previous}): ").strip()
+            if not s:
+                return previous
+        else:
+            s = input("请输入选项 1/2/3: ").strip()
+        mapping = {"1": "cps", "2": "tps", "3": "ulpod"}
+        kind = mapping.get(s)
+        if kind:
+            return kind
+        print_status("输入无效，请输入 1/2/3", "warning")
+
+
+def _port_from_slot_for_dfu(slot: str) -> int:
+    mapping = {"1": 7801, "2": 7802, "3": 7803, "4": 7804}
+    if slot not in mapping:
+        raise ValueError(f"Slot 无效: {slot}")
+    return mapping[slot]
+
+
+def _ip_from_slot_for_fct(slot: str) -> str:
+    mapping = {"1": "169.254.1.32", "2": "169.254.1.33", "3": "169.254.1.34", "4": "169.254.1.35"}
+    if slot not in mapping:
+        raise ValueError(f"Slot 无效: {slot}")
+    return mapping[slot]
+
+
+def get_rpc_endpoint(slot: str, station: str) -> Tuple[str, int]:
+    if station in {"PowerDFU", "DataDFU"}:
+        return "169.254.1.32", _port_from_slot_for_dfu(slot)
+    return _ip_from_slot_for_fct(slot), 7801
+
+
+def get_rpc_client(slot: str, station: str):
     RPCClientWrapper = _get_rpc_client_wrapper()
     if RPCClientWrapper is None:
         detail = f"{type(_RPC_IMPORT_ERROR).__name__}: {_RPC_IMPORT_ERROR}" if _RPC_IMPORT_ERROR else "unknown import error"
         raise RuntimeError("RPC client not available: " + detail)
-    ip = f"169.254.1.{channel}"
-    rpc = RPCClientWrapper(ip=ip, port=7801)
+    ip, port = get_rpc_endpoint(slot, station)
+    return RPCClientWrapper(ip=ip, port=port), ip, port
+
+
+def _resolve_sshpass_path() -> Optional[str]:
+    """Find bundled sshpass first, then system sshpass."""
+    candidates = []
+    if _BASE_DIR:
+        candidates.append(str(Path(_BASE_DIR) / "bin" / "sshpass"))
+    env_path = os.environ.get("NRF_TOOL_SSHPASS")
+    if env_path:
+        candidates.append(env_path)
+    which = shutil.which("sshpass")
+    if which:
+        candidates.append(which)
+    for p in candidates:
+        if p and Path(p).exists() and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def scp_firmware_to_remote(
+    firmware: Path,
+    ip: str,
+    remote_dir: str,
+    timeout_sec: float = 60.0,
+    user: str = "root",
+    password: str = "123456",
+) -> str:
+    fw = firmware.expanduser().resolve()
+    if not fw.exists():
+        raise FileNotFoundError(f"FW 不存在: {fw}")
+    remote_path = f"{user}@{ip}:{remote_dir}"
+    print_status(f"SCP 上传: {fw} -> {remote_path}", "info")
+    sshpass_path = _resolve_sshpass_path()
+    env = os.environ.copy()
+    env["SSHPASS"] = password
+
+    if sshpass_path:
+        ssh_mkdir_cmd = [
+            sshpass_path, "-e",
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            f"{user}@{ip}",
+            "mkdir", "-p", remote_dir,
+        ]
+        scp_cmd = [
+            sshpass_path, "-e",
+            "scp",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            str(fw),
+            remote_path,
+        ]
+        subprocess.run(ssh_mkdir_cmd, check=True, timeout=timeout_sec, env=env)
+        subprocess.run(scp_cmd, check=True, timeout=timeout_sec, env=env)
+    else:
+        # Fallback for offline Macs without sshpass.
+        askpass = Path(tempfile.gettempdir()) / f"nrf_tool_askpass_{os.getpid()}.sh"
+        askpass.write_text("#!/bin/sh\necho \"$NRF_SCP_PASSWORD\"\n", encoding="utf-8")
+        askpass.chmod(0o700)
+        try:
+            env2 = os.environ.copy()
+            env2["NRF_SCP_PASSWORD"] = password
+            env2["SSH_ASKPASS"] = str(askpass)
+            env2["SSH_ASKPASS_REQUIRE"] = "force"
+            env2["DISPLAY"] = env2.get("DISPLAY", ":0")
+            ssh_cmd = [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                f"{user}@{ip}",
+                "mkdir", "-p", remote_dir,
+            ]
+            scp_cmd = [
+                "scp",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                str(fw),
+                remote_path,
+            ]
+            subprocess.run(ssh_cmd, check=True, timeout=timeout_sec, env=env2, stdin=subprocess.DEVNULL)
+            subprocess.run(scp_cmd, check=True, timeout=timeout_sec, env=env2, stdin=subprocess.DEVNULL)
+        finally:
+            try:
+                askpass.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return f"{remote_dir.rstrip('/')}/{fw.name}"
+
+
+def rpc_power_up_powerfct(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "PowerFCT")
     rpc.call("mixdevice.reset")
     rpc.call("mixdevice.relay", "DUT_SYS_RST_0KPULLDOWN")
     rpc.call("mixdevice.relay", "SOCKET_POWER_ON_BY_DUT_PP_VSYS")
     rpc.call("mixdevice.relay", "DUT_PP_VBATT_TO_PSU_BATTERY_POS1")
     rpc.call("mixdevice.enable_battery_output", 8000, 5000)
     rpc.call("mixdevice.relay", "DUT_PP1V8_AON_TO_DMMCH0", "CONNECT")
-    rpc.call("mixdevice.measureVoltageWithDMM", 'ch0', '7000mV')
+    rpc.call("mixdevice.measureVoltageWithDMM", "ch0", "7000mV")
     time.sleep(2)
 
+
+def rpc_power_off_powerfct(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "PowerFCT")
+    rpc.call("mixdevice.disable_battery_output")
+    time.sleep(1)
+    rpc.call("mixdevice.reset")
+
+
+def rpc_power_up_datadfu(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "DataDFU")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "LDO_TO_PP_VSYS_SW")
+    rpc.call("mixdevice.relay", "PP8V_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "PP1V83_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "UART_SEL_SW")
+
+
+def rpc_power_off_datadfu(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "DataDFU")
+    rpc.call("mixdevice.reset")
+
+
+def rpc_prepare_flash_datadfu(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "DataDFU")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "LDO_TO_PP_VSYS_SW")
+    rpc.call("mixdevice.relay", "PP8V_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "TP_SYS_RST_PULLUP")
+    rpc.call("mixdevice.relay", "PP1V83_LDO_ENABLE")
+    time.sleep(0.5)
+    rpc.call("mixdevice.relay", "TP_SYS_RST_PULLDOWN")
+    rpc.call("mixdevice.relay", "FIXTURE_TO_NRF_SWD_SEL_SW")
+
+
+def rpc_flash_powerdfu_cps(channel: str, firmware: Path, scp_user: str = "root", scp_password: str = "123456") -> None:
+    rpc, ip, _ = get_rpc_client(channel, "PowerDFU")
+    remote_file = scp_firmware_to_remote(
+        firmware, ip, "/mix/addon/test_function/fw/cps",
+        user=scp_user, password=scp_password,
+    )
+    print_status(f"CPS FW 远端路径: {remote_file}", "info")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "LDO_TO_PP5V_AON_SW")
+    rpc.call("mixdevice.relay", "PP5V_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "PP1V83_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "FIXTURE_TO_NRF_CPS_IIC_SEL_SW")
+    time.sleep(3)
+    rpc.call("mixdevice.cps_program_auto", timeout_ms=50000)
+    time.sleep(1)
+    rpc.call("mixdevice.reset")
+
+
+def rpc_flash_powerdfu_tps(channel: str, firmware: Path, scp_user: str = "root", scp_password: str = "123456") -> None:
+    rpc, ip, _ = get_rpc_client(channel, "PowerDFU")
+    remote_file = scp_firmware_to_remote(
+        firmware, ip, "/mix/addon/test_function/fw/tps",
+        user=scp_user, password=scp_password,
+    )
+    print_status(f"TPS FW 远端路径: {remote_file}", "info")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "LDO_TO_PP_PDC_LDO_3V3")
+    rpc.call("mixdevice.relay", "PP3V3_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "FIXTURE_TO_PDC_IIC_SEL_SW")
+    time.sleep(3)
+    rpc.call("mixdevice.tps_program_auto", timeout_ms=50000)
+
+
+def rpc_prepare_flash_powerdfu_ulpod(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "PowerDFU")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "LDO_TO_PP1V83_AON")
+    rpc.call("mixdevice.relay", "PP1V83_LDO_ENABLE")
+    rpc.call("mixdevice.relay", "FIXTURE_TO_NRF_SWD_SEL_SW")
+    time.sleep(3)
+
+
+def rpc_power_up_datafct(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "DataFCT")
+    rpc.call("mixdevice.reset")
+    rpc.call("mixdevice.relay", "DUT_USBUART_EN")
+    rpc.call("mixdevice.relay", "DUT_PP_VSYS_TO_PSU_BATTERY_POS1")
+    rpc.call("mixdevice.enable_battery_output", 8000, 5000)
+
+
+def rpc_power_off_datafct(channel: str) -> None:
+    rpc, _, _ = get_rpc_client(channel, "DataFCT")
+    rpc.call("mixdevice.reset")
+
+
+def classify_program_onefile_result(log: str, expected_keyword: str) -> Tuple[bool, Optional[str]]:
+    lower = (log or "").lower()
+    has_check = "examination succeed" in lower
+    has_erase = ("mass erase complete" in lower) or ("erase complete" in lower)
+    has_program = re.search(r"wrote\s+\d+\s+bytes", lower) is not None
+    has_verify = re.search(r"verified\s+\d+\s+bytes", lower) is not None
+
+    if expected_keyword and expected_keyword not in (log or ""):
+        return False, f"Expected keyword '{expected_keyword}' not found"
+    if has_check and has_erase and has_program and has_verify:
+        return True, None
+    if "error" in lower or "failed" in lower:
+        return False, "tool output contains error/failed"
+
+    missing = []
+    if not has_check:
+        missing.append("check")
+    if not has_erase:
+        missing.append("erase")
+    if not has_program:
+        missing.append("program")
+    if not has_verify:
+        missing.append("verify")
+    return False, "missing steps: " + ", ".join(missing)
+
+
+def run_program_onefile(
+    program_onefile: Path,
+    firmware: Path,
+    address: str,
+    serial: str,
+    timeout_sec: float,
+    expected_keyword: str,
+) -> Tuple[bool, str]:
+    fw = firmware.expanduser().resolve()
+    tool = program_onefile.expanduser().resolve()
+    if not tool.exists():
+        raise FileNotFoundError(f"program_onefile 不存在: {tool}")
+    ext = fw.suffix.lower().lstrip(".")
+    if ext not in {"bin", "hex"}:
+        raise ValueError(f"ULPOD 仅支持 .bin/.hex: {fw}")
+
+    cmd = [
+        str(tool),
+        ext,
+        f"--file={fw}",
+        f"--start-address={address}",
+        f"--adapter-serial={serial}",
+    ]
+    print_status(f"执行: {' '.join(shlex.quote(x) for x in cmd)}", "info")
+    cp = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout_sec,
+        check=False,
+    )
+    out = cp.stdout or ""
+    if cp.returncode != 0:
+        return False, out
+    ok, reason = classify_program_onefile_result(out, expected_keyword)
+    if ok:
+        return True, out
+    return False, out + ("\n" + reason if reason else "")
 
 # =============================================================================
 # Result Analysis
@@ -792,8 +1144,15 @@ def main() -> int:
     parser.add_argument("--after", choices=["none", "reset", "go"], default="none", help="After loadfile: none/reset/go (default: none)")
     parser.add_argument("--once", action="store_true", default=False, help="Program once and exit (default: keep running)")
     parser.add_argument("--script-out-dir", default=None, help="Directory to save generated .jlink scripts (default: ~/NRFFlashTool_scripts)")
-    parser.add_argument("--channel", choices=["32", "33", "34", "35"], default=None, help="DUT channel (169.254.1.<channel>:7801)")
+    parser.add_argument("--slot", choices=["1", "2", "3", "4"], default=None, help="DUT slot")
+    parser.add_argument("--channel", choices=["32", "33", "34", "35"], default=None, help="兼容旧参数: 32/33/34/35 会自动映射为 slot 1/2/3/4")
     parser.add_argument("--no-rpc", action="store_true", default=False, help="Skip pre-flash RPC power-up sequence")
+    parser.add_argument("--station", choices=STATIONS, default=None, help="Station mode")
+    parser.add_argument("--powerdfu-flash", choices=["cps", "tps", "ulpod"], default=None, help="PowerDFU flash type")
+    parser.add_argument("--program-onefile", default="/Users/gdlocal/RestorePackage/FW/tools/program_onefile", help="Path to program_onefile for PowerDFU ULPOD")
+    parser.add_argument("--program-expected", default="", help="Expected keyword for program_onefile output (default: no keyword check)")
+    parser.add_argument("--scp-user", default="root", help="SCP user for PowerDFU CPS/TPS upload")
+    parser.add_argument("--scp-password", default="123456", help="SCP password for PowerDFU CPS/TPS upload")
 
     args = parser.parse_args()
 
@@ -804,25 +1163,159 @@ def main() -> int:
     if not jlink_exe.exists():
         print_status(f"JLinkExe not found: {jlink_exe}", "error")
         print(colored("\n  Please install SEGGER J-Link or specify correct path with --jlink-exe", Style.DIM_TEXT))
-        return 2
+        # return 2
 
     previous_firmware: Optional[Path] = None
     previous_serial: Optional[str] = None
-    previous_channel: Optional[str] = None
+    previous_slot: Optional[str] = None
+    previous_station: Optional[str] = args.station
+    previous_powerdfu_flash: Optional[str] = args.powerdfu_flash
     initial_fw = args.fw or args.fw_pos
     first = True
 
+    slot_from_channel = {"32": "1", "33": "2", "34": "3", "35": "4"}
+    fixed_slot = args.slot or (slot_from_channel.get(args.channel) if args.channel else None)
+
     while True:
-        if args.no_rpc:
-            channel = args.channel or previous_channel
-        else:
-            channel = args.channel or prompt_channel(previous_channel)
+        station = args.station or prompt_station(previous_station)
+        slot = fixed_slot or prompt_slot(previous_slot)
+        action = prompt_action(station)
+
+        if action in {"power_up", "power_off"}:
+            op_name = "一键上电" if action == "power_up" else "一键下电"
+            print_step(1, 1, op_name)
+            try:
+                if slot is None:
+                    slot = prompt_slot(previous_slot)
+                rpc_ip, rpc_port = get_rpc_endpoint(slot, station)
+                print_status(f"RPC target: {rpc_ip}:{rpc_port}", "info")
+                if station == "PowerFCT" and action == "power_up":
+                    rpc_power_up_powerfct(slot)
+                elif station == "PowerFCT" and action == "power_off":
+                    rpc_power_off_powerfct(slot)
+                elif station == "DataDFU" and action == "power_up":
+                    rpc_power_up_datadfu(slot)
+                elif station == "DataDFU" and action == "power_off":
+                    rpc_power_off_datadfu(slot)
+                elif station == "DataFCT" and action == "power_up":
+                    rpc_power_up_datafct(slot)
+                elif station == "DataFCT" and action == "power_off":
+                    rpc_power_off_datafct(slot)
+                else:
+                    raise RuntimeError(f"不支持的操作: {station} / {action}")
+                print_status(f"{op_name}完成", "success")
+            except Exception as ex:
+                print_status(f"{op_name}失败: {ex}", "error")
+                if args.once:
+                    return 2
+                if not prompt_continue("继续操作下一台?", default_yes=True):
+                    return 2
+                previous_slot = slot
+                previous_station = station
+                first = False
+                continue
+
+            previous_slot = slot
+            previous_station = station
+            first = False
+            if args.once:
+                return 0
+            if not prompt_continue("继续操作下一台?", default_yes=True):
+                return 0
+            print()
+            continue
+
+        if station == "PowerDFU":
+            flash_kind = args.powerdfu_flash or prompt_powerdfu_flash_kind(previous_powerdfu_flash)
+            print_step(1, 3, f"PowerDFU Flash ({flash_kind.upper()})")
+            try:
+                firmware = resolve_firmware_interactive(previous_firmware, initial_fw if first else None)
+                if flash_kind == "cps":
+                    rpc_flash_powerdfu_cps(slot, firmware, scp_user=str(args.scp_user), scp_password=str(args.scp_password))
+                elif flash_kind == "tps":
+                    rpc_flash_powerdfu_tps(slot, firmware, scp_user=str(args.scp_user), scp_password=str(args.scp_password))
+                elif flash_kind == "ulpod":
+                    rpc_prepare_flash_powerdfu_ulpod(slot)
+                    if args.serial:
+                        serial = str(args.serial)
+                    elif previous_serial and prompt_continue(f"使用上次J-Link S/N {previous_serial}?", default_yes=True):
+                        serial = previous_serial
+                    else:
+                        serial = select_jlink_serial(
+                            jlink_exe=jlink_exe,
+                            timeout_sec=min(10.0, float(args.timeout)),
+                            forced_serial=None,
+                        )
+                    ok, output = run_program_onefile(
+                        program_onefile=Path(args.program_onefile),
+                        firmware=firmware,
+                        address=str(args.address),
+                        serial=serial,
+                        timeout_sec=float(args.timeout),
+                        expected_keyword=str(args.program_expected or ""),
+                    )
+                    print_separator("─", 60)
+                    print(colored("  program_onefile Output:", Style.HEADER))
+                    for line in (output or "").splitlines():
+                        print(colored(f"  {line}", Style.DIM_TEXT))
+                    print_separator("─", 60)
+                    if not ok:
+                        raise RuntimeError("ULPOD 烧录失败，请检查输出")
+                    previous_serial = serial
+                else:
+                    raise RuntimeError(f"未知 PowerDFU 烧录类型: {flash_kind}")
+                print_status("PowerDFU 烧录完成", "success")
+            except Exception as ex:
+                print_status(f"PowerDFU 烧录失败: {ex}", "error")
+                if args.once:
+                    return 2
+                if not prompt_continue("继续操作下一台?", default_yes=True):
+                    return 2
+                previous_slot = slot
+                previous_station = station
+                previous_powerdfu_flash = flash_kind
+                first = False
+                continue
+
+            previous_firmware = firmware
+            previous_slot = slot
+            previous_station = station
+            previous_powerdfu_flash = flash_kind
+            first = False
+            if args.once:
+                return 0
+            if not prompt_continue("继续操作下一台?", default_yes=True):
+                return 0
+            print()
+            continue
+
+        if station == "DataFCT":
+            print_status("DataFCT 一键烧录暂未实现（按需求保持 TODO）", "warning")
+            if args.once:
+                return 2
+            if not prompt_continue("继续操作下一台?", default_yes=True):
+                return 2
+            previous_slot = slot
+            previous_station = station
+            first = False
+            continue
+
+        pre_flash_rpc = None
+        post_flash_rpc = None
+        if not args.no_rpc:
+            if station == "PowerFCT":
+                pre_flash_rpc = rpc_power_up_powerfct
+                post_flash_rpc = rpc_power_off_powerfct
+            elif station == "DataDFU":
+                pre_flash_rpc = rpc_prepare_flash_datadfu
+                post_flash_rpc = rpc_power_off_datadfu
 
         print_separator("═", 60)
         print(colored("  ⚙  Configuration", Style.HEADER))
         print_separator("═", 60)
 
         config_items = [
+            ("Station", station),
             ("Device", args.device),
             ("Interface", args.interface.upper()),
             ("Speed", f"{args.speed} kHz"),
@@ -830,12 +1323,12 @@ def main() -> int:
             ("Script", args.script_mode),
             ("After", args.after),
             ("JLinkExe", str(jlink_exe)),
-            ("Channel", channel if channel else "-"),
-            ("RPC", "Skip" if args.no_rpc else "Enable"),
+            ("Slot", slot if slot else "-"),
+            ("RPC", "Skip" if args.no_rpc else "Enable (station profile)"),
         ]
         print_config_table("  ⚙  Configuration", config_items)
 
-        print_step(1, 4, "Selecting Firmware")
+        print_step(1, 5, "Selecting Firmware")
         try:
             firmware = resolve_firmware_interactive(previous_firmware, initial_fw if first else None)
         except Exception as ex:
@@ -857,14 +1350,15 @@ def main() -> int:
                 print_status(f"HEX data bytes: {format_bytes(hex_bytes)}", "info")
         print_status(f"FW sha256: {sha}", "info")
 
-        print_step(2, 4, "Verifying J-Link")
+        print_step(2, 5, "Verifying J-Link")
         print_status(f"JLinkExe found: {jlink_exe}", "success")
 
-        if not args.no_rpc:
-            print_step(2, 4, "Powering DUT (RPC)")
+        if pre_flash_rpc is not None:
+            print_step(2, 5, "Powering DUT (RPC)")
             try:
-                print_status(f"RPC target: 169.254.1.{channel}:7801", "info")
-                rpc_power_up(channel)
+                rpc_ip, rpc_port = get_rpc_endpoint(slot, station)
+                print_status(f"RPC target: {rpc_ip}:{rpc_port}", "info")
+                pre_flash_rpc(slot)
                 print_status("RPC power-up done", "success")
             except Exception as ex:
                 print_status(f"RPC power-up failed: {ex}", "error")
@@ -872,11 +1366,11 @@ def main() -> int:
                     return 2
                 if not prompt_continue("继续烧录下一台?", default_yes=True):
                     return 2
-                previous_channel = channel
+                previous_slot = slot
                 first = False
                 continue
 
-        print_step(3, 4, "Selecting J-Link Device")
+        print_step(3, 5, "Selecting J-Link Device")
         try:
             if args.serial:
                 serial = str(args.serial)
@@ -899,6 +1393,7 @@ def main() -> int:
         print()
         print_separator("─", 60)
         print_config_table("  📋 Final Configuration", [
+            ("Station", station),
             ("Firmware", str(fw_info["path"])),
             ("FW File Size", format_bytes(fw_size)),
             ("FW SHA256", sha[:16]),
@@ -909,10 +1404,10 @@ def main() -> int:
             ("Script", args.script_mode),
             ("After", args.after),
             ("Serial", serial),
-            ("Channel", channel if channel else "-"),
+            ("Slot", slot if slot else "-"),
         ])
 
-        print_step(4, 4, "Flashing Firmware")
+        print_step(4, 5, "Flashing Firmware")
         print_status("Starting J-Link programming...", "info")
         print()
 
@@ -994,6 +1489,9 @@ def main() -> int:
 
                 # Check for critical errors (ignore non-fatal restore errors)
                 if "error:" in line_lower and "restore" not in line_lower and "ramcode" not in line_lower:
+                    if post_flash_rpc is not None:
+                        print_step(5, 5, "Powering Off DUT (RPC)")
+                        post_flash_rpc(slot)
                     print()
                     print_status(f"J-Link error: {line.strip()}", "error")
 
@@ -1007,6 +1505,9 @@ def main() -> int:
             expected_path = str(firmware.resolve())
             print_status(f"J-Link downloaded: {norm_downloaded}", "info")
             if norm_downloaded != expected_path:
+                if post_flash_rpc is not None:
+                    print_step(5, 5, "Powering Off DUT (RPC)")
+                    post_flash_rpc(slot)
                 print_status("Firmware mismatch: J-Link downloaded file is NOT the selected FW!", "error")
                 print_status(f"Selected FW: {expected_path}", "error")
                 if args.once:
@@ -1057,6 +1558,9 @@ def main() -> int:
         print_separator("─", 60)
 
         if p.returncode != 0:
+            if post_flash_rpc is not None:
+                print_step(5, 5, "Powering Off DUT (RPC)")
+                post_flash_rpc(slot)
             print()
             print_status("J-Link exited with non-zero return code", "error")
             if args.once:
@@ -1072,6 +1576,9 @@ def main() -> int:
         ok, warn = classify_jlink_result(out)
 
         if not ok:
+            if post_flash_rpc is not None:
+                print_step(5, 5, "Powering Off DUT (RPC)")
+                post_flash_rpc(slot)
             print()
             print_status(f"Programming failed: {warn}", "error")
             if args.once:
@@ -1100,6 +1607,9 @@ def main() -> int:
             continue
 
         # Success!
+        if post_flash_rpc is not None:
+            print_step(5, 5, "Powering Off DUT (RPC)")
+            post_flash_rpc(slot)
         print()
         print(colored("  ╔══════════════════════════════════════════════════════════╗", Style.SUCCESS))
         print(colored("  ║", Style.SUCCESS) + colored("              [ SUCCESS ] Programming Complete             ", Style.SUCCESS) + colored("║", Style.SUCCESS))
@@ -1109,7 +1619,7 @@ def main() -> int:
 
         previous_firmware = firmware
         previous_serial = serial
-        previous_channel = channel
+        previous_slot = slot
         first = False
         if args.once:
             return 0
